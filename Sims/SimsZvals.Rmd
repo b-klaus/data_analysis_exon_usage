@@ -1,0 +1,361 @@
+
+<!--
+To compile run:
+library(rmarkdown); render( "SimsZvals.Rmd" );knitr::purl("SimsZvals.Rmd")
+-->
+
+
+
+Simulation using normal mixtures
+======================
+
+ **LAST UPDATE AT**
+
+```{r, echo=FALSE}
+print(date())
+```
+
+Preparations
+--------------
+
+We first set global chunk options and load the
+neccessary packages.
+
+```{r setup}
+library(knitr)
+library(reshape2)
+library(tidyverse)
+library(concaveFDR)
+library(ggplot2)
+library(grid)
+library(locfdr)
+library(fdrtool)
+library(devtools)
+
+if (!("mixfdr" %in%  (installed.packages()[, 1]))) {
+  devtools::install_url("https://cran.r-project.org/src/contrib/Archive/mixfdr/mixfdr_1.0.tar.gz")
+}
+
+library(mixfdr)
+library(BiocParallel)
+library(grid)
+library(RColorBrewer)
+
+opts_chunk$set(fig.width=14, fig.height=10, cache=T, 
+error=FALSE, cache.lazy=FALSE)
+options(digits = 2, scipen = 10)
+
+multicoreParam <- MulticoreParam(workers = round(parallel::detectCores() * 0.75),
+                                 catch.errors = FALSE)
+multicoreParam
+register(multicoreParam)
+
+```
+
+## Set parameters for the simulation
+
+We now set parameters to simulate "z-scores" according to the mixture models
+of Strimmer 2008 and create some helper functions. 
+
+```{r setting parameters}
+
+### number of reps
+B = 1000 
+### number of stats
+d = 200
+### prop of null
+eta0 = 0.8
+### sigma
+sigma = 2
+
+```
+We have a total of `d ` z-values
+and we repeat the simulation `B ` times (B=`r B`)
+
+## Simulate z scores
+
+We now  draw the mixture model test statistics.
+
+```{r simulate z scores, eval=FALSE}
+##  d z-scores in every column 
+
+  ZMatEasy  <- t(laply(bplapply(seq_len(B), function(i){ 
+   get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 5, alt.max = 10)$z 
+	}), identity))
+
+#set.seed(777)
+#hist(get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 5, alt.max = 10)$z)
+
+save(ZMatEasy, file = "ZMatEasy.rda")
+
+
+  ZMatHard  <- t(laply(bplapply(seq_len(B), function(i){ 
+   get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 2, alt.max = 10)$z 
+  }), identity))
+
+#
+#hist(get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 2, alt.max = 10)$z)
+
+save(ZMatHard, file = "ZMatHard.rda")
+
+```
+Load the presimulated HND scores
+```{r load simulated HND scores, eval=TRUE}
+load("ZMatEasy.rda")
+z <- ZMatEasy[,1]
+hist(z)
+load("ZMatHard.rda")
+z2 <- ZMatHard[,1]
+hist(z2)
+```
+
+## Helper functions
+
+The following helpfer functions run various FDR estimation algorithms.
+
+
+```{r helper functions}
+
+#### z-score based FDR methods ####
+
+run.fdrtool = function(z, type=1)
+{
+  require("fdrtool") 
+  if(type == 1) res = fdrtool(z, "normal", plot=FALSE, verbose=FALSE)
+  if(type == 2) res = fdrtool(z, "normal", plot=FALSE, verbose=FALSE, cutoff.method="pct0", pct0=0.75)
+  if(type == 3) res = fdrtool(z, "normal", plot=FALSE, verbose=FALSE, cutoff.method="locfdr")
+  
+  if(type == 4){
+   source("/home/bklaus/uni/Projects/fdrtool-dev/TESTConcave/log.fdr.R")
+   resFDR = log.fdr.fda(z, theo = FALSE, classic = FALSE)
+   eta0 =  resFDR$eta0
+   sd = resFDR$sd
+
+   res   = fdrtool(resFDR$pval, "pvalue", plot=FALSE, verbose=FALSE)
+   }
+ 
+ if(type != 4){	
+  eta0 = res$param[,"eta0"]
+  sd = res$param[,"sd"]
+  }
+  fdr = res$lfdr
+  Fdr = res$qval
+ 
+  return( list(eta0=eta0, sd=sd, fdr=fdr, Fdr=Fdr) )
+}
+
+
+run.locfdr = function(z)
+{
+  require("locfdr")
+  res = locfdr(z, plot=0)
+
+  eta0 = res$fp0["mlest","p0"]
+  sd = res$fp0["mlest","sigma"]
+  fdr = res$fdr
+  Fdr = NULL
+
+  return( list(eta0=eta0, sd=sd, fdr=fdr, Fdr=Fdr) )
+}
+
+
+run.ConcaveFDR = function(z){
+
+  res = ConcaveFDR(z, "normal",plot=FALSE, verbose =FALSE, cutoff.method = 
+  "smoothing")  
+  fdr = res$lfdr.log
+  Fdr = res$qval.log
+  
+  return( list(eta0=res$param[3], sd=res$param[5], fdr=fdr, Fdr=Fdr) )
+}
+
+
+
+```
+
+## Run FDR estimation algorithms
+
+simulation helper functions
+```{r simulation helper functions}
+
+simFDREasy = function(method, ...)
+{
+  
+  return(ldply(bplapply(seq_len(B), function(i){ 
+    z <- ZMatEasy[,i]
+    tmp <-  get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 5, alt.max = 10)
+     true.Fdr = tmp$Fdr.func(z)
+     true.fdr = tmp$fdr.func(z)
+     out = method(z, ...)
+     # out = method(z)
+    res = numeric(6)
+    names(res) = c("eta0", "sd", "fdr.MSE", "Fdr.MSE", "fdr.MSE.subset", "Fdr.MSE.subset")
+    
+    res[ 1] = out$eta0
+    res[ 2] = out$sd
+    res[ 3] = mean( (true.fdr-out$fdr)^2 )
+    res[ 4] = mean( (true.Fdr-out$Fdr)^2 )
+
+    idx = (abs(z)>2)
+
+
+    res[ 5] = mean( ((true.fdr-out$fdr)[idx])^2 )
+    res[ 6] = mean( ((true.Fdr-out$Fdr)[idx])^2 )
+    
+    return(res)
+     }),identity))
+   
+}
+
+simFDRHard = function(method, ...)
+{
+  
+  return(ldply(bplapply(seq_len(B), function(i){ 
+    z <- ZMatHard[,i]
+    tmp <-  get.random.zscore(d, sigma = sigma, eta0 = eta0, alt.min = 2, alt.max = 10)
+     true.Fdr = tmp$Fdr.func(z)
+     true.fdr = tmp$fdr.func(z)
+     out = method(z, ...)
+     # out = method(z)
+    res = numeric(6)
+    names(res) = c("eta0", "sd", "fdr.MSE", "Fdr.MSE", "fdr.MSE.subset", "Fdr.MSE.subset")
+    
+    res[ 1] = out$eta0
+    res[ 2] = out$sd
+    res[ 3] = mean( (true.fdr-out$fdr)^2 )
+    res[ 4] = mean( (true.Fdr-out$Fdr)^2 )
+
+    idx = (abs(z)>2)
+
+    res[ 5] = mean( ((true.fdr-out$fdr)[idx])^2 )
+    res[ 6] = mean( ((true.Fdr-out$Fdr)[idx])^2 )
+    
+    return(res)
+     }),identity))
+   
+}
+```
+
+We can now run the estimation algorithms and save the results.
+
+```{r run simulations, eval = FALSE}
+EasyResults <- ldply(list(ConcaveFDR = simFDREasy(run.ConcaveFDR),
+              locfdr = simFDREasy(run.locfdr),
+              fdrtool = simFDREasy(run.fdrtool)), identity, .id = "Method")
+               
+
+HardResults <- ldply(list(ConcaveFDR = simFDRHard(run.ConcaveFDR),
+              locfdr = simFDRHard(run.locfdr),
+              fdrtool = simFDRHard(run.fdrtool)), identity, .id = "Method")
+
+#test <- simFDREasy(run.ConcaveFDR)
+#test2 <- simFDRHard(run.ConcaveFDR)
+
+save(EasyResults, HardResults, file = "ZModelResults.RData")
+
+```
+
+```{r load simulations results}
+load("ZModelResults.RData")
+#display.brewer.pal(6, name ="Set3")
+
+
+```
+## Produce plots
+
+Here we produce some plots to evaluate the estimation  results graphically.
+We first define some helper functions for the plots
+
+```{r helper functions for plots}
+	vplayout <- function(x, y){
+	viewport(layout.pos.row = x, layout.pos.col = y)
+	}
+
+#locfdrMLE fdrtoolEmp resConcave 
+# "#D95F02"  "#7570B3"  "#E6AB02" 
+
+ #pal <- brewer.pal(3, name ="Dark2")
+  pal <- c("#E6AB02" , "#D95F02" , "#7570B3" )
+names(pal) <- c("ConcaveFDR", "locfdr" ,"fdrtool")
+```
+
+
+### fdr accuracy plots
+```{r plots - fdr accuracy}
+(qplot(Method, fdr.MSE, data = EasyResults, color = Method, main = "MSE Easy Model") 
+    + geom_boxplot() 
+    + ylim(0,.1) + scale_color_manual(values = c(pal)))
+
+(qplot(Method, fdr.MSE, data = HardResults, color = Method, main = "MSE Hard Model") 
+    + geom_boxplot() 
+    + ylim(0,.1) + scale_color_manual(values = c(pal)))
+```
+
+
+### fdr accuracy plots subset with fdr < 0.2
+```{r plots - fdr accuracy subset}
+
+(qplot(Method, fdr.MSE.subset, data = EasyResults, color = Method, main = "MSE Subset Easy Model") 
+    + geom_boxplot() 
+    + ylim(0,.1) + scale_color_manual(values = c(pal)))
+
+(qplot(Method, fdr.MSE.subset, data = HardResults, color = Method, main = "MSE Subset Hard Model") 
+    + geom_boxplot() 
+    + ylim(0,.1) + scale_color_manual(values = c(pal)))
+```
+
+
+### Null model parameters accuracy plots
+
+## eta0
+
+```{r plots - eta0 accuracy}
+(qplot(Method, eta0, data = EasyResults, color = Method, main = "eta0 Easy Model")
+    + geom_boxplot() + ylim(0.6,1)
+  + scale_color_manual(values = c(pal)) + 
+   geom_hline(aes(yintercept = get("eta0", envir=  .GlobalEnv )), 
+              color ="coral3")
+ )
+
+(qplot(Method, eta0, data = HardResults, color = Method, main = "eta0 Hard Model")
+    + geom_boxplot() + ylim(0.6,1)
+  + scale_color_manual(values = c(pal)) + 
+   geom_hline(aes(yintercept = get("eta0", envir=  .GlobalEnv )), 
+              color ="coral3")
+ )
+
+
+```
+
+
+## sigma
+
+
+```{r plots - sigma accuracy}
+# ## get accuracy for all methods
+(qplot(Method, sd, data = EasyResults, color = Method, main = "sigma Easy Model")
+    + geom_boxplot() + ylim(1,3.5)
+  + scale_color_manual(values = c(pal)) + 
+   geom_hline(aes(yintercept = get("sigma", envir=  .GlobalEnv )), 
+              color ="coral3")
+ )
+
+(qplot(Method, sd, data = HardResults, color = Method, main = "sigma Hard Model")
+    + geom_boxplot() + ylim(1,3.5)
+  + scale_color_manual(values = c(pal)) + 
+   geom_hline(aes(yintercept = get("sigma", envir=  .GlobalEnv )), 
+              color ="coral3")
+ )
+
+```
+
+
+ **SESSION INFO**
+ 
+
+```{r SessionInfo, echo=FALSE}
+
+sessionInfo()
+
+```
+

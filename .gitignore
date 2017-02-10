@@ -7,3 +7,15 @@ Alejandro-Paper/
 figure/
 AnalysisAlejandro_files/
 AnalysisAlejandro_cache/
+Sims/HNDMat.rda
+Sims/SimsHND-Model.md
+Sims/SimsHND-Model_cache/
+Sims/SimsHND-Model_files/
+Sims/SimsZvals.md
+Sims/SimsZvals_cache/
+Sims/SimsZvals_files/
+Sims/ZMatEasy.rda
+Sims/ZMatHard.rda
+Sims/ZModelResults.RData
+Sims/cache/
+Sims/fdrEstimationResults.RData

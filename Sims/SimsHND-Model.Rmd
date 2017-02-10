@@ -1,0 +1,410 @@
+
+<!--
+To compile run:
+library(rmarkdown); render( "SimsHND-Model.Rmd" );knitr::purl("SimsHND-Model.Rmd")
+-->
+
+
+
+Simulation using the  HND model
+======================
+
+ **LAST UPDATE AT**
+
+```{r, echo=FALSE}
+print(date())
+```
+
+Preparations
+--------------
+
+We first set global chunk options and load the
+neccessary packages.
+
+```{r setup}
+library(knitr)
+library(reshape2)
+library(concaveFDR)
+library(ggplot2)
+library(grid)
+library(locfdr)
+library(fdrtool)
+library(devtools)
+
+if (!("mixfdr" %in%  (installed.packages()[, 1]))) {
+  devtools::install_url("https://cran.r-project.org/src/contrib/Archive/mixfdr/mixfdr_1.0.tar.gz")
+}
+
+library(BiocParallel)
+library(tidyverse)
+library(grid)
+library(RColorBrewer)
+
+opts_chunk$set(fig.width=14, fig.height=10, cache=T, 
+error=FALSE, cache.lazy=FALSE)
+options(digits = 2, scipen = 10)
+
+multicoreParam <- MulticoreParam(workers = round(parallel::detectCores() * 0.75),
+                                 catch.errors = FALSE)
+multicoreParam
+register(multicoreParam)
+
+```
+
+## Set parameters for the simulation
+
+We now set parameters to simulate "z-scores" distributed according to the HND model
+(Rice and Spiegelhalter, 2008, Klaus and Strimmmer, 2011) 
+and create some helper functions. 
+
+```{r setting parameters}
+
+### number of reps
+B = 1000 
+### number of stats
+d = 1000
+### prop of null
+eta0 = 0.8
+### sigma
+sigma = 1
+
+### grid for true fdrs
+s = seq(0.01,10,by=0.01) 
+
+## FDR functions for the HND model
+Fdr.HNDscore = function(x)  concaveFDR:::HND(abs(x),  concaveFDR:::eta02k(eta0)) 
+fdr.HNDscore = function(x)  concaveFDR:::hnd(abs(x),  concaveFDR:::eta02k(eta0))
+
+## true FDRs
+truefdr =  fdr.HNDscore(s) 
+trueFDR = Fdr.HNDscore(s)
+
+
+### test it
+score <- concaveFDR:::get.random.HNDscore(1000, eta0)
+qplot(score) 
+
+```
+We have a total of `d ` z-values
+and we repeat the simulation `B ` times (B=`r B`)
+
+## Simulate HND scores
+
+We now simulate the HND test statistics.
+
+```{r simulate HND scores, eval=FALSE}
+##  d z-scores in every column 
+  HNDMat  <- t(laply(bplapply(seq_len(B), function(i){ 
+    get.random.HNDscore(d)
+	}), identity))
+
+save(HNDMat, file = "HNDMat.rda")
+
+hist(get.random.HNDscore(1000), breaks = 100)
+
+hist(HNDMat[1:1000,1], breaks = 100)
+z <- HNDMat[1:1000,1]
+```
+Load the presimulated HND scores
+```{r load simulated HND scores, eval=TRUE}
+load("HNDMat.rda")
+```
+
+## Helper functions
+
+The following helpfer functions run various FDR estimation algorithms
+and return the estimated fdr for the grid points as given by `s `.
+
+```{r helper functions}
+
+mix.fdr.fun = function(z,P,J,empnull=FALSE){
+  theonull = !empnull
+  a = NA
+	if(theonull) a = 1
+	e = mixFdr(z[1:d],J=J, P = P, theonull = theonull, noiseSD = a, calibrate = 
+	FALSE, plots = FALSE, nocheck = TRUE)
+	ind = abs(e$mu - e$mu[1])<=.1
+	tmp = (fdrMixModel(s,e,ind))
+	sigma = e$sigma[1]
+	eta_0 = e$pi[1]
+	return ( list (lfdr = tmp , eta_0 = eta_0,  sigma = sigma ))
+	#return(tailFDRMixModel(s, e, ind)$tailFDR)
+}
+
+#test = mix.fdr.fun(z,P=50,J=3,empnull = TRUE)
+
+loc.fdr.fun = function(z){
+
+	loc = locfdr(z, plot = 0)
+	eta_0 = loc$fp0["mlest","p0"]
+  	sigma = loc$fp0["mlest","sigma"]
+	
+	res = loc$fdr	
+	tmp = approx(x = z[1:d], y= res, xout = s)$y
+	tmp[which(is.na(tmp))] = 0.0 #replace NAs by 0.0
+
+	return ( list (lfdr = tmp , eta_0 = eta_0,  sigma = sigma ))
+}
+
+#test = loc.fdr.fun(z)
+#plot(s,test$lfdr)
+
+#test = loc.fdr.fun(z)
+
+
+fdrtool.fdr.fun = function(z, met = "fndr"){
+	tool = fdrtool(z[1:d], "normal",plot=FALSE, verbose =FALSE, cutoff.method = 
+	met)	
+	res = tool$lfdr		
+	
+	#sp = splinefun(z, logit(pmax(pmin(res,0.999),.001)), method = "natural")	
+	#pmin(1,pmax(0,logistic(sp(s))))	
+	tmp = approx(x = z[1:d], y= res, xout = s)$y
+	tmp[which(is.na(tmp))] = 0.0 #replace NAs by 0.0
+
+  return ( list (lfdr = tmp , eta_0 = tool$param[3],  sigma = tool$param[5]))
+}
+
+#test = fdrtool.fdr.fun(z)
+#plot(s,test$lfdr, type = "l")
+
+
+##theo = FALSE; classic = FALSE
+concaveFDR.fun = function(z){
+  res = concaveFDR(z[1:d], "normal",plot=FALSE, verbose =FALSE, cutoff.method = 
+  "smoothing")	
+  fdr = res$lfdr.log
+
+
+  tmp = approx(x = z[1:d], y= fdr, xout = s)$y  
+  tmp[which(is.na(tmp))] = 0.0 #replace NAs by 0.0
+  return ( list (lfdr = tmp , eta_0 = res$param[3],  sigma = res$param[5]))
+}
+
+#test = concaveFDR.fun(z)
+#plot(s,test$lfdr, type = "l")
+
+
+HND.sigma.fdr.fun = function(z){
+	
+	param.out = concaveFDR:::hnd.fitnull(z,"normal")
+	eta0 = param.out$eta0
+     	sd = param.out$sd
+	
+	pval = 2-2*pnorm(abs(z/sd))
+	
+
+	### compute FDR values  
+	az = qnorm(1-pval/2)
+  	k = concaveFDR:::eta02k(eta0)
+
+  	#Fdr = HND(az, k)
+  	fdr = concaveFDR:::hnd(az, k)
+
+
+tmp=approx(x = z[1:d], y= fdr , xout = s)$y
+tmp[which(is.na(tmp))] = 0.0 #replace NAs by 0.0
+  return ( list (lfdr = tmp , eta_0 = eta0,  sigma = sd ))
+}
+
+#test = HND.sigma.fdr.fun(z)
+#plot(s,test$lfdr, type = "l")
+
+
+#external empirical null
+
+HND.fdr.fun = function(z){
+	
+  res = concaveFDR(z[1:d], "normal",plot=FALSE, verbose =FALSE, cutoff.method = 
+  "smoothing")  
+  fdr = res$lfdr.log
+  
+    eta_0 = res$param[3] 
+    sd = res$param[5]
+     pval =res$pval	
+
+	# pv = pval.log
+	### compute FDR values  
+	az = qnorm(1-pval/2)
+  k =  concaveFDR:::eta02k(eta0)
+
+  	#Fdr = HND(az, k)
+  	fdr = concaveFDR:::hnd(az, k)
+
+
+tmp=approx(x = z[1:d], y= fdr , xout = s)$y
+tmp[which(is.na(tmp))] = 0.0 #replace NAs by 0.0
+  return ( list (lfdr = tmp , eta_0 = eta_0,  sigma = sd ))
+}
+
+#test = HND.fdr.fun(z)
+#plot(s,test[1:d])
+#plot(s,test$lfdr, type = "l")
+####################################
+
+
+
+```
+
+## Run FDR estimation algorithms
+
+We can now run the estimation algorithms and save the results
+
+```{r run simulations, eval = FALSE}
+fdrResults <- bplapply(seq_len(B), function(i){ 
+   return(list(mixfdrEMP =  mix.fdr.fun(HNDMat[,i], J = 3, P=round(0.2*d), 
+                                         empnull=TRUE),
+               locfdrMLE = loc.fdr.fun(HNDMat[,i]),
+               fdrtoolEmp = fdrtool.fdr.fun(HNDMat[,i]),
+               resHNDEmp = HND.sigma.fdr.fun(HNDMat[,i]),
+               resHND = HND.fdr.fun(HNDMat[,i]),
+               resConcave = concaveFDR.fun(HNDMat[,i])
+               )) 
+  })
+save(fdrResults, file = "fdrEstimationResults.RData")
+
+
+```
+
+```{r load simulations results}
+load("fdrEstimationResults.RData")
+#display.brewer.pal(6, name ="Set3")
+
+pal <- brewer.pal(6, name ="Dark2")
+names(pal) <- c("mixfdrEMP", "locfdrMLE", 
+                "fdrtoolEmp", "resHNDEmp",  "resHND" ,  "resConcave")
+```
+## Produce plots
+
+Here we produce some plots to evaluate the estimation  results graphically.
+We first define some helper functions for the plots
+
+```{r helper functions for plots}
+getVarFDR <- function(fdr) mean((fdr-truefdr)^2)
+getVarFDRsub <- function(fdr) mean((fdr[truefdr < 0.2] - truefdr[truefdr < 0.2])^2)
+#   grid.newpage()
+# 	pushViewport(viewport(layout = grid.layout(3, 1)))
+#	  print(den.plot, vp = vplayout(1, 1))
+
+	vplayout <- function(x, y){
+	viewport(layout.pos.row = x, layout.pos.col = y)
+	}
+```
+
+
+### fdr accuracy plots
+```{r plots - fdr accuracy}
+## get accuracy for all methods
+dataAcc <- as.data.frame(plyr::laply(bplapply(fdrResults, function(X){ 
+   return(sapply(X, function(Y){getVarFDR(Y$lfdr) })) 
+  }),identity))
+
+dataAcc <- melt(dataAcc, variable.name = "Method", value.name = "MSE")
+(qplot(Method, MSE, data = dataAcc, color = Method) + geom_boxplot() 
+    + ylim(0,.3) + scale_color_manual(values = c(pal)))
+```
+
+
+### fdr accuracy plots subset with fdr < 0.2
+```{r plots - fdr accuracy subset}
+## get accuracy for all methods
+dataAccSub <- as.data.frame(plyr::laply(bplapply(fdrResults, function(X){ 
+   return(sapply(X, function(Y){getVarFDRsub(Y$lfdr) })) 
+  }),identity))
+
+dataAccSub <- melt(dataAccSub, variable.name = "Method", value.name = "MSE")
+(qplot(Method, MSE, data = dataAccSub, color = Method) + geom_boxplot() 
+    + ylim(0,.3) + scale_color_manual(values = c(pal)))
+```
+
+### fdr bias plots
+We now produce bias plot for the fdr curve by computing the mean over 
+all simulation runs.
+
+```{r plots - fdr bias plot}
+
+dataBias <- lapply(bplapply(fdrResults, function(X){ 
+   return(lapply(X, function(Y){Y$lfdr})) 
+  }), function(Z){ plyr::mutate(as.data.frame(Z), abs_z=s )})
+dataBias <- plyr::ldply(dataBias, identity)
+dataBias <- plyr::ddply(dataBias, "abs_z", apply, 2, mean)
+dataBias <- melt(dataBias,"abs_z", variable.name = "Method", 
+                 value.name = "mean_fdr")
+(qplot(abs_z, mean_fdr, data = dataBias, color = Method) 
+  + geom_line() + ylim(0,1)+ scale_color_manual(values = c(pal)))
+```
+
+
+### fdr variability  plots
+We now produce variiability plots for the fdr curve by computing a measure
+of variability over  all simulation runs.
+
+```{r plots - fdr variability plot}
+datasd <- lapply(bplapply(fdrResults, function(X){ 
+   return(lapply(X, function(Y){Y$lfdr})) 
+  }), function(Z){ plyr::mutate(as.data.frame(Z), abs_z=s )})
+datasd <- plyr::ldply(datasd, identity)
+#test <- plyr::dlply(datasd, "abs_z", identity)
+datasd <- plyr::ddply(datasd, "abs_z", apply, 2, mad)
+datasd$abs_z <- s
+datasd <- melt(datasd,"abs_z", variable.name = "Method", 
+                 value.name = "fdr_variability")
+
+(qplot(abs_z, fdr_variability, data = datasd, color = Method) 
+  + geom_line() + ylim(0,0.5)+ scale_color_manual(values = c(pal)))
+```
+
+
+
+### Null model parameters accuracy plots
+
+
+## eta0
+
+```{r plots - eta0 accuracy}
+# ## get accuracy for all methods
+dataEta0 <- plyr::ldply(bplapply(fdrResults, function(X){ 
+   return(sapply(X, function(Y){Y$eta_0})) 
+  }),identity)
+
+dataEta0 <- melt(dataEta0, variable.name = "Method", value.name = "est_eta0")
+
+(qplot(Method, est_eta0, data = dataEta0, color = Method)
+    + geom_boxplot() + ylim(0.6,1)
+  + scale_color_manual(values = c(pal)) + geom_hline(aes(yintercept = eta0), color ="coral3")
+ )
+
+
+```
+
+
+## sigma
+
+
+
+```{r plots - sigma accuracy}
+# ## get accuracy for all methods
+dataSigma <- plyr::ldply(bplapply(fdrResults, function(X){ 
+   return(sapply(X, function(Y){Y$sigma})) 
+  }),identity)
+dataSigma <- melt(dataSigma, variable.name = "Method", value.name = "est_sigma")
+
+
+(qplot(Method, est_sigma, data = dataSigma, color = Method)
+    + geom_boxplot() + ylim(0,1.5)
+  + scale_color_manual(values = c(pal)) + geom_hline(aes(yintercept = sigma), 
+                                                     color ="coral3")
+ )
+
+```
+
+
+ **SESSION INFO**
+ 
+
+```{r SessionInfo, echo=FALSE}
+
+sessionInfo()
+
+```
+
